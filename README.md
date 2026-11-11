@@ -222,6 +222,8 @@ The desktop installer:
 
 `--with-root` adds three system units: the [zram tier](#-zram-tier-lz4--zstd), [prefetch](#-prefetch-fast-switch-back) and the [age helper](#-age-helper-cold-memory-map). Each can be installed on its own with `--with-zram-tier`, `--with-prefetch` or `--with-age`.
 
+> 🤖 Want an AI assistant (Claude Code or similar) to do it for you, tuned to your machine? Point it at [`docs/AI-INSTALL.md`](docs/AI-INSTALL.md).
+
 > ⚠️ The root extras have so far been tested only in the benchmark VM. On your own machine, start with the rootless install and add the extras one by one.
 
 ---

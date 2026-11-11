@@ -33,7 +33,7 @@
 ## 📖 Contents
 
 - [What it does](#-what-it-does)
-- [Benchmark](#-benchmark)
+- [Benchmark](#-benchmark) (desktop, server, game)
 - [How it works](#-how-it-works)
 - [Quick start](#-quick-start)
 - [Requirements](#-requirements)
@@ -113,6 +113,23 @@ Four services (2.5 GB, the database protected by both tools) serve requests for 
 | Services' memory stall (PSI) | **0 ms** | 0 ms | 4.4 / 4.6 s |
 
 Where Ultra RAM is behind: p99.9 during the deploy, and a small, steady memory stall (about 0.5% of the run) from reading rarely used data back from disk. Wolfram's PSI reads 0 even though its requests waited up to 8.6 s, so compare the latency rows between the two.
+
+### 🎮 Game
+
+The desktop setup again (five background apps, 4 GB RAM). After one minute a game starts: 1000 MB, four threads at 60 fps keeping the CPUs busy, and five minutes in it loads a 500 MB level. One run each.
+
+| Metric | No daemon | Wolfram | Ultra RAM without game mode | **Ultra RAM** |
+|---|---:|---:|---:|---:|
+| Late frames (> 33 ms) | 1841 | 2467 | 340 | **90** |
+| Frame time p99 | 33.2 ms | 35.9 ms | 23.3 ms | **17.8 ms** |
+| Frame time p99.9 | 71.6 ms | 54.8 ms | 37.6 ms | **28.9 ms** |
+| Worst frame | 6728 ms | 598 ms | 365 ms | **335 ms** |
+| Level load (500 MB) | 40.5 s | 22.0 s | 7.5 s | **3.3 s** |
+| Free RAM right before the level load | 43 MB | 181 MB | 229 MB | **450 MB** |
+| Game's own major faults | 17065 | 514 | 0 | **0** |
+| Switch back to the 5 apps afterwards | 27.8 s | 24.6 s | 7.1 s | **5.8 s** |
+
+While a protected app (a game) is open, Ultra RAM keeps offloading the *background* apps even though the CPUs are busy, never touches the game, and runs at `SCHED_IDLE`, so it only gets CPU time the game leaves unused. Without a daemon the kernel swaps under pressure and takes the game's own memory too.
 
 ### Why the gap
 
@@ -428,7 +445,7 @@ The worst case is meant to be *"it did nothing"*.
 | Offload cap | 50% of an app | Switching back stays quick |
 | Swap room · zram size | ≥ 25% free · ≤ 25% of RAM | Stops before swap fills or zram crowds out RAM |
 | Global stall | system PSI ≤ 10 | Never adds work to a struggling system |
-| Busy CPUs | desktop: ≤ 60% | Waits while an app launches or a build runs |
+| Busy CPUs | desktop: ≤ 60% | Waits while an app launches or a build runs. Not while a protected app (a game) is open: then the background apps are offloaded at `SCHED_IDLE` and the game is left alone |
 | Suspend / resume | — | A long gap only re-baselines, no action |
 | Protected | games / databases and system daemons | Never touched; configurable |
 | Desktop shell | — | Only `app.slice`; Plasma, KWin, GNOME Shell are out of scope |
@@ -493,7 +510,7 @@ Page cache already counts as available and is dropped instantly when needed. Evi
 <details>
 <summary><b>Will it slow down my games?</b></summary>
 
-Busy apps are left alone, common game launchers are protected by default, it waits while the CPUs are busy, and `ultra-ram pause` stops it at any time.
+No: the game is protected and never touched. While it runs, Ultra RAM offloads only the background apps (browser, chat), at `SCHED_IDLE`, so the game gets their RAM. In the benchmark that cut late frames from 1841 to 90 and a level load from 40 s to 3.3 s. `ultra-ram pause` still stops it at any time.
 </details>
 
 <details>

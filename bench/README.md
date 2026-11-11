@@ -127,6 +127,16 @@ How to read it:
 - Wolfram's PSI reads 0 although its requests stalled for seconds, so PSI does not capture its cost in this run. Compare the latency rows, not PSI, between the two.
 - The database is protected by both tools, so its numbers show only what the neighbours' offloading costs it.
 
+### Game scenario
+
+`fakegame.c` is a synthetic game: it loads its assets, then renders at 60 fps on N threads (each frame a fixed amount of CPU work, calibrated to ~70% of a frame, plus reads across its whole memory), and loads one more level at a given time. It reports frame-time percentiles, late frames (> 33 ms), the level load time and its own major faults.
+
+Put a `game.conf` next to the binaries (`<start_s> <base_mb> <level_mb> <level_at_s> <threads>`, the reference run used `60 1000 500 300 4`) and any desktop scenario starts the game as `app-gamescope-1` at that time and stops it at the end of the run. `report.py` then adds the game rows. Results are in the main README; one run each, so treat small differences as noise. The median frame time differs between runs because the per-frame work is calibrated at each start.
+
+```bash
+gcc -O2 -static -pthread -o fakegame fakegame.c -lm
+```
+
 ## Caveats
 
 - The reference VM ran under QEMU **TCG** (software emulation, no KVM), so absolute times are several times slower than real hardware. Compare scenarios with each other, not with your desktop.

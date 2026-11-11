@@ -1,0 +1,16 @@
+[package]
+name = "ultra-ram"
+version = "1.0.0"
+edition = "2021"
+description = "PSI-driven proactive memory reclaim, leak detection and RAM health monitor"
+authors = ["Yusif Ezizov — Azedev"]
+license = "AGPL-3.0-only"
+
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

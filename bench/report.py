@@ -29,11 +29,11 @@ def load(d):
     ph = {}
     for line in open(f"{d}/phase.txt"):
         k, _, v = line.strip().partition("=")
-        if k.startswith("phase2"):
+        if k.startswith("phase2") or k in ("game_start", "game_end"):
             ph[k] = snap(v)
-        elif k in ("daemon_cpu_usec", "daemon_mem_peak", "helper_cpu_usec", "helper_cpu_end_usec"):
+        elif k in ("daemon_cpu_usec", "daemon_mem_peak", "helper_cpu_usec", "helper_cpu_end_usec", "game_t0", "game_t1"):
             ph[k] = float(v or 0)
-    apps = {a: kv(f"{d}/{a}.txt") for a in APPS + ["newapp"]}
+    apps = {a: kv(f"{d}/{a}.txt") for a in APPS + ["newapp", "game"]}
     return rows, ph, apps
 
 
@@ -71,6 +71,19 @@ def summarise(d):
     s["daemon_cpu_s"] = (ph.get("daemon_cpu_usec", 0) + ph.get("helper_cpu_usec", 0)) / 1e6
     s["resume_helper_cpu_s"] = (ph.get("helper_cpu_end_usec", 0) - ph.get("helper_cpu_usec", 0)) / 1e6
     s["daemon_mem_mb"] = ph.get("daemon_mem_peak", 0) / 2**20
+    g = apps["game"]
+    if g:
+        gs, ge = ph.get("game_start"), ph.get("game_end")
+        for k in ("p50_ms", "p99_ms", "p999_ms", "max_ms", "late", "level_ms", "avail_before_level_mb", "majflt", "frames"):
+            s["game_" + k] = g.get(k, float("nan"))
+        if gs and ge:
+            s["game_psi_ms"] = (ge["psi_some_us"] - gs["psi_some_us"]) / 1000
+            s["game_psi_full_ms"] = (ge["psi_full_us"] - gs["psi_full_us"]) / 1000
+            s["game_allocstall"] = ge["allocstall"] - gs["allocstall"]
+            s["game_avail_start_mb"] = gs["avail_kb"] / 1024
+            t0, t1 = ph.get("game_t0", 0), ph.get("game_t1", 1e9)
+            during = [r["avail_kb"] / 1024 for r in rows if t0 <= r["t"] <= t1]
+            s["game_avail_min_mb"] = min(during) if during else float("nan")
     return s
 
 
@@ -101,6 +114,23 @@ ROWS = [
     ("Daemon + root helpers CPU during run (s)", "daemon_cpu_s", "{:.1f}"),
     ("Helper CPU during switch-back (s)", "resume_helper_cpu_s", "{:.1f}"),
     ("Daemon peak memory (MB)", "daemon_mem_mb", "{:.1f}"),
+]
+
+GAME_ROWS = [
+    ("Game: frames rendered", "game_frames", "{:.0f}"),
+    ("Game: frame time p50 (ms)", "game_p50_ms", "{:.2f}"),
+    ("**Game: frame time p99 (ms)**", "game_p99_ms", "{:.2f}"),
+    ("**Game: frame time p99.9 (ms)**", "game_p999_ms", "{:.2f}"),
+    ("Game: worst frame (ms)", "game_max_ms", "{:.0f}"),
+    ("**Game: late frames (> 33 ms)**", "game_late", "{:.0f}"),
+    ("Available RAM when the game starts (MB)", "game_avail_start_mb", "{:.0f}"),
+    ("Available RAM, lowest while playing (MB)", "game_avail_min_mb", "{:.0f}"),
+    ("Available RAM right before the level load (MB)", "game_avail_before_level_mb", "{:.0f}"),
+    ("**Game: level load time (ms)**", "game_level_ms", "{:.0f}"),
+    ("Game: major faults", "game_majflt", "{:.0f}"),
+    ("Memory stall while playing, PSI some (ms)", "game_psi_ms", "{:.0f}"),
+    ("Memory stall while playing, PSI full (ms)", "game_psi_full_ms", "{:.0f}"),
+    ("Direct-reclaim stalls while playing", "game_allocstall", "{:.0f}"),
 ]
 
 # ───────────────────────────── server scenarios ─────────────────────────────
@@ -270,7 +300,7 @@ if __name__ == "__main__":
     srv = [sc for sc in scs if is_server(f"{root}/{sc}")]
     if desk:
         res = {sc: summarise(f"{root}/{sc}") for sc in desk}
-        table(desk, res, ROWS)
+        table(desk, res, ROWS + (GAME_ROWS if any("game_frames" in r for r in res.values()) else []))
     if srv:
         if desk:
             print()

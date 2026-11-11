@@ -633,6 +633,28 @@ fn is_protected(cfg: &Config, key: &str) -> bool {
     cfg.protect.iter().any(|p| k.contains(p))
 }
 
+/// Desktop: a protected app (a game, by default) of at least `min_app_mb` is open.
+fn game_open(cfg: &Config, apps: &Apps) -> bool {
+    cfg.profile == Profile::Desktop
+        && apps.iter().any(|(k, cgs)| is_protected(cfg, k) && cgs.iter().map(|c| c.current).sum::<u64>() >= cfg.min_app_mb * MB)
+}
+
+/// Run the calling thread at SCHED_IDLE: it gets a CPU only when nothing else wants it. The work
+/// behind `memory.reclaim` (scanning, compressing, writing to swap) runs in the writer's context,
+/// so this keeps it out of a game's way. Needs no privileges; failure leaves the policy as it was.
+fn sched_idle() -> bool {
+    #[repr(C)]
+    struct SchedParam {
+        prio: i32,
+    }
+    extern "C" {
+        fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
+    }
+    const SCHED_IDLE: i32 = 5;
+    // SAFETY: a valid pointer to a zeroed sched_param; pid 0 is the calling thread.
+    unsafe { sched_setscheduler(0, SCHED_IDLE, &SchedParam { prio: 0 }) == 0 }
+}
+
 /// Sub-cgroup levels `pids_in` descends at most. Users can nest their own cgroup trees
 /// arbitrarily deep, and prefetch walks them as root.
 const PIDS_MAX_DEPTH: usize = 32;
@@ -1045,12 +1067,17 @@ fn gate_check(cfg: &Config, m: &Mem, check_avail: bool, zram_ram: u64, psi10: f6
 /// The daemon's per-tick gate: pause, then the busy-CPU gate, then the global safety gate. With
 /// the server defaults the busy-CPU and available-RAM checks are off (`OFF_PCT`: a share can
 /// never exceed 100%), so only pause, swap, zram and PSI can stop it.
-fn tick_gate(cfg: &Config, m: &Mem, busy: f64, paused: bool, zram_ram: u64, psi10: f64) -> Result<(), Gate> {
+///
+/// `game`: a protected app (a game) is open. Then busy CPUs are the game itself, which is exactly
+/// when it wants RAM: the busy gate is skipped and the background apps are offloaded. The game
+/// is never touched (it is protected), and the daemon runs at SCHED_IDLE, so it only gets CPU
+/// time the game leaves unused.
+fn tick_gate(cfg: &Config, m: &Mem, busy: f64, paused: bool, game: bool, zram_ram: u64, psi10: f64) -> Result<(), Gate> {
     if paused {
         Err(Gate::Paused)
-    } else if busy > cfg.max_busy_cpu_pct {
-        // Someone is working (an app launching, a build, a game): reclaim costs CPU and
-        // memory bandwidth right when they are needed. Cold memory can wait a tick.
+    } else if busy > cfg.max_busy_cpu_pct && !game {
+        // Someone is working (an app launching, a build): reclaim costs CPU and memory
+        // bandwidth right when they are needed. Cold memory can wait a tick.
         Err(Gate::Busy(busy))
     } else {
         gate_check(cfg, m, true, zram_ram, psi10)
@@ -1342,8 +1369,10 @@ fn daemon(profile: Profile) {
         );
     } else {
         println!(
-            "ultra-ram daemon başladı (addım {}s, boş RAM < {}% olanda işə düşür)",
-            cfg.tick_secs, cfg.activate_avail_pct
+            "ultra-ram daemon başladı (addım {}s, boş RAM < {}% olanda işə düşür{})",
+            cfg.tick_secs,
+            cfg.activate_avail_pct,
+            if sched_idle() { ", SCHED_IDLE" } else { "" }
         );
     }
 
@@ -1357,8 +1386,10 @@ fn daemon(profile: Profile) {
         let busy = cpu_busy_pct(cpu_prev, cpu_now);
         cpu_prev = cpu_now;
         let paused = p.run.join("paused").exists();
-        let g = tick_gate(&cfg, &mem, busy, paused, zram().2, psi(Path::new("/proc/pressure/memory")).some10);
+        let game = game_open(&cfg, &apps);
+        let g = tick_gate(&cfg, &mem, busy, paused, game, zram().2, psi(Path::new("/proc/pressure/memory")).some10);
         let (code, msg) = match &g {
+            Ok(()) if game => ("game", "oyun rejimi — oyuna toxunulmur, arxa plan tətbiqlərinin soyuq yaddaşı köçürülür".to_string()),
             Ok(()) => ("active", active_msg(profile)),
             Err(x) => (x.code(), x.msg(profile)),
         };
@@ -2121,25 +2152,31 @@ mod tests {
         let s = Config::for_profile(Profile::Server);
         // A busy machine with lots of free RAM: the desktop waits, the server works.
         let m = mem(80, 90);
-        assert_eq!(tick_gate(&d, &m, 95.0, false, 0, 0.0), Err(Gate::Busy(95.0)));
-        assert_eq!(tick_gate(&d, &mem(80, 90), 10.0, false, 0, 0.0).map_err(|g| g.code()), Err("enough"));
-        assert_eq!(tick_gate(&s, &m, 100.0, false, 0, 0.0), Ok(()));
-        assert_eq!(tick_gate(&s, &mem(100, 90), 100.0, false, 0, 0.0), Ok(()));
+        assert_eq!(tick_gate(&d, &m, 95.0, false, false, 0, 0.0), Err(Gate::Busy(95.0)));
+        // A game open: busy CPUs are the game, which wants RAM now. The other gates still hold.
+        let short = mem(20, 90);
+        assert_eq!(tick_gate(&d, &short, 95.0, false, false, 0, 0.0), Err(Gate::Busy(95.0)));
+        assert_eq!(tick_gate(&d, &short, 95.0, false, true, 0, 0.0), Ok(()));
+        assert_eq!(tick_gate(&d, &short, 95.0, true, true, 0, 0.0), Err(Gate::Paused));
+        assert_eq!(tick_gate(&d, &short, 95.0, false, true, 0, 25.0), Err(Gate::Pressure(25.0)));
+        assert_eq!(tick_gate(&d, &mem(80, 90), 10.0, false, false, 0, 0.0).map_err(|g| g.code()), Err("enough"));
+        assert_eq!(tick_gate(&s, &m, 100.0, false, false, 0, 0.0), Ok(()));
+        assert_eq!(tick_gate(&s, &mem(100, 90), 100.0, false, false, 0, 0.0), Ok(()));
         // The safety gates stay for both: pause, swap, zram size, global PSI.
         for c in [&d, &s] {
             let low = mem(20, 90);
-            assert_eq!(tick_gate(c, &low, 0.0, true, 0, 0.0), Err(Gate::Paused));
-            assert_eq!(tick_gate(c, &mem(20, 10), 0.0, false, 0, 0.0).map_err(|g| g.code()), Err("swapfull"));
-            assert_eq!(tick_gate(c, &low, 0.0, false, GB * 2, 0.0).map_err(|g| g.code()), Err("zramfull"));
-            assert_eq!(tick_gate(c, &low, 0.0, false, 0, 25.0), Err(Gate::Pressure(25.0)));
+            assert_eq!(tick_gate(c, &low, 0.0, true, false, 0, 0.0), Err(Gate::Paused));
+            assert_eq!(tick_gate(c, &mem(20, 10), 0.0, false, false, 0, 0.0).map_err(|g| g.code()), Err("swapfull"));
+            assert_eq!(tick_gate(c, &low, 0.0, false, false, GB * 2, 0.0).map_err(|g| g.code()), Err("zramfull"));
+            assert_eq!(tick_gate(c, &low, 0.0, false, false, 0, 25.0), Err(Gate::Pressure(25.0)));
             let noswap = Mem { swap_total: 0, swap_free: 0, ..low };
-            assert_eq!(tick_gate(c, &noswap, 0.0, false, 0, 0.0), Err(Gate::NoSwap));
-            assert_eq!(tick_gate(c, &low, 0.0, false, 0, 0.0), Ok(()));
+            assert_eq!(tick_gate(c, &noswap, 0.0, false, false, 0, 0.0), Err(Gate::NoSwap));
+            assert_eq!(tick_gate(c, &low, 0.0, false, false, 0, 0.0), Ok(()));
         }
         // An operator can turn the desktop gates back on for a server.
         let s2 = parse_config("activate_avail_pct = 30\nmax_busy_cpu_pct = 70", Profile::Server);
-        assert_eq!(tick_gate(&s2, &mem(20, 90), 80.0, false, 0, 0.0), Err(Gate::Busy(80.0)));
-        assert_eq!(tick_gate(&s2, &mem(50, 90), 10.0, false, 0, 0.0).map_err(|g| g.code()), Err("enough"));
+        assert_eq!(tick_gate(&s2, &mem(20, 90), 80.0, false, false, 0, 0.0), Err(Gate::Busy(80.0)));
+        assert_eq!(tick_gate(&s2, &mem(50, 90), 10.0, false, false, 0, 0.0).map_err(|g| g.code()), Err("enough"));
         // Desktop messages are the original Azerbaijani ones; the server speaks English.
         assert_eq!(Gate::Busy(70.0).msg(Profile::Desktop), "sistem məşğuldur (CPU 70%) — köçürmə təxirə salındı");
         assert_eq!(Gate::Paused.msg(Profile::Desktop), "fasilədədir (ultra-ram resume ilə davam etdirin)");

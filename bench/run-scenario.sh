@@ -22,7 +22,7 @@ U=bench
 mkdir -p "$OUT"; exec > >(tee -a "$OUT/log.txt") 2>&1
 echo "== scenario $SC  run=${RUN_SECS}s  $(uname -r)"
 
-for b in fakeapp fakeserver wolfram ultra-ram; do [ -f "$BIN/$b" ] && install -m755 "$BIN/$b" /usr/local/bin/; done
+for b in fakeapp fakeserver fakegame wolfram ultra-ram; do [ -f "$BIN/$b" ] && install -m755 "$BIN/$b" /usr/local/bin/; done
 
 # ── environment report ──
 {
@@ -370,7 +370,27 @@ esac
 T0=$(date +%s)
 el() { echo $(( $(date +%s) - T0 )); }
 snap 0 >> "$OUT/samples.csv"
-while [ "$(el)" -lt "$RUN_SECS" ]; do sleep 10; snap "$(el)" >> "$OUT/samples.csv"; done
+# Optional game phase: $BIN/game.conf = "<start_s> <base_mb> <level_mb> <level_at_s> <threads>".
+# The game runs as app-gamescope-1 (protected by Ultra RAM's default list) until the run ends.
+GAME_CONF=$( [ -f "$BIN/game.conf" ] && cat "$BIN/game.conf" )
+GAME_STARTED=
+while [ "$(el)" -lt "$RUN_SECS" ]; do
+  sleep 10; snap "$(el)" >> "$OUT/samples.csv"
+  if [ -n "$GAME_CONF" ] && [ -z "$GAME_STARTED" ] && [ "$(el)" -ge "$(awk '{print $1}' <<< "$GAME_CONF")" ]; then
+    read -r _ gb gl gat gth <<< "$GAME_CONF"
+    echo "game starts at $(el)s: $gb MB + level $gl MB at ${gat}s, $gth threads"
+    echo "game_start=$(snap x)" >> "$OUT/phase.txt"; echo "game_t0=$(el)" >> "$OUT/phase.txt"
+    asu systemd-run --user --quiet --unit=app-gamescope-1 /usr/local/bin/fakegame "$gb" "$gl" "$gat" "$gth" "$RES/game.txt"
+    GAME_STARTED=1
+  fi
+done
+if [ -n "$GAME_STARTED" ]; then
+  asu systemctl --user kill -s SIGUSR1 app-gamescope-1.service
+  for _ in $(seq 600); do [ -f "$RES/game.txt" ] && break; sleep 1; done
+  echo "game: $(cat $RES/game.txt)"; cp "$RES/game.txt" "$OUT/"
+  echo "game_end=$(snap x)" >> "$OUT/phase.txt"; echo "game_t1=$(el)" >> "$OUT/phase.txt"
+  sleep 5
+fi
 
 # ── phase 2: open a new 900 MB app while the old ones are still running ──
 echo "launching newapp at $(el)s"
